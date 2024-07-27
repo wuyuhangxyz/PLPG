@@ -332,7 +332,7 @@ def create_transition_table(dfa_list, jump_table, group_list):
             transition_table[from_group.status]["ACCEPT"] = from_group.function
     return transition_table
 
-class Lex:
+class Lexer:
     def __init__(self):
         self.patterns = []
     
