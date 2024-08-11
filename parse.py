@@ -1,13 +1,19 @@
+from lex import *
+import types
+import enum
+
 class Product:
-    def __init__(self, name, body, function = None, priority = None):
+    def __init__(self, name, body, function = None):
         self.name = name
         self.body = body
         self.function = function
     def __str__(self):
-        return f"{self.name} -> {''.join(self.body)}"
+        return f"{self.name} -> {' '.join(self.body)}"
     __repr__ = __str__
     def _eq__(self, other):
         return self.name == other.name and self.body == other.body
+    def __hash__(self):
+        return hash((self.name, tuple(self.body)))
 
 class Item:
     STATUS = -1
@@ -22,6 +28,8 @@ class Item:
     __repr__ = __str__
     def __eq__(self, other):
         return self.product == other.product and self.pos == other.pos and self.follow == other.follow
+    def __hash__(self):
+        return hash((self.product, self.pos, self.follow))
 
 class State:
     STATUS = -1
@@ -50,10 +58,11 @@ def first(product, terminal, nonterminal):
             if term in terminal:
                 first_set.add(term)
                 break
-            term_set = first(term, terminal, nonterminal)
-            first_set.update(term_set - {"ε"})
-            if "ε" not in term_set:
-                break
+            if term != product.name:
+                term_set = first(term, terminal, nonterminal)
+                first_set.update(term_set - {"ε"})
+                if "ε" not in term_set:
+                    break
         else:
             first_set.add("ε")
     return first_set
@@ -160,7 +169,7 @@ def make_action_table(terminal, priority, goto_table, state_list):
                 reduce_priority, reduce_associativity = priority.get(term, None)
                 break
         if shift_priority is None or reduce_priority is None:
-            pass
+            action_table[{status, character}] = shift_action
         if shift_priority < reduce_priority:
             action_table[(status, character)] = shift_action
         elif shift_priority > reduce_priority:
@@ -172,63 +181,312 @@ def make_action_table(terminal, priority, goto_table, state_list):
                 action_table[(status, character)] = reduce_action
     return action_table
 
+class C: # Combinator
+    List = []
+    Id = -1
+    def __init__(self, body = None):
+        self.bodies = [body] if body else []
+        self.is_closure = False
+    def __and__(self, other):
+        new_pg = C()
+        if not (self.is_closure or other.is_closure):
+            for i in self.bodies:
+                for j in other.bodies:
+                    new_pg.bodies.append(i + j)
+        elif not self.is_closure:
+            id_ = str(other.id)
+            for i in self.bodies:
+                new_pg.bodies.append([*i, id_])
+        else:
+            id_ = str(self.id)
+            for i in other.bodies:
+                new_pg.bodies.append([id_, *i])
+        return new_pg
+    def __or__(self, other):
+        self.bodies += other.bodies
+        if other in C.List:
+            C.List.remove(other)
+        return self
+    def __mul__(self, count):
+        for i in range(len(self.bodies)):
+            self.bodies[i] *= count
+        return self
+    def optional(self):
+        self.bodies.append([])
+        return self
+    def repeat(self, min_count, max_count):
+        for i in range(len(self.bodies)):
+            for j in range(min_count, max_count+1):
+                self.bodies[i] *= j
+        return self
+    def one_to_n(self):
+        C.Id += 1
+        self.id = C.Id
+        C.List.append(self)
+        id_ = str(self.id)
+        for i in range(len(self.bodies)):
+            self.bodies.append([id_] + self.bodies[i])
+        self.is_closure = True
+        return self
+    def zero_to_n(self):
+        return self.one_to_n().optional()
+    def generate(self, terminal, option):
+        if self not in C.List:
+            C.Id += 1
+            self.id = C.Id
+            C.List.append(self)
+        res = {}
+        for pg in C.List:
+            id_ = str(pg.id)
+            res[id_] = []
+            for b in pg.bodies:
+                if option == "ALL":
+                    rets = [f"*args[{m}]" if b[m].isdigit() else f"args[{m}]" for m in range(len(b))]
+                elif option == "T":
+                    rets = []
+                    for m in range(len(b)):
+                        if b[m].isdigit():
+                            rets.append(f"*args[{m}]")
+                        elif b[m] in terminal:
+                            rets.append(f"args[{m}]")
+                elif option == "NT":
+                    rets = []
+                    for m in range(len(b)):
+                        if b[m].isdigit():
+                            rets.append(f"*args[{m}]")
+                        elif b[m] not in terminal:
+                            rets.append(f"args[{m}]")
+                else:
+                    raise ValueError(f"Invalid option: {option}")
+                body = f"def fn(parser, args):\n    return [{','.join(rets)}]"
+                fn = types.FunctionType(compile(body, "", "exec").co_consts[0], {})
+                res[id_].append(Product(id_, b, fn))
+        C.List = []
+        return res
+
+class TokenType(enum.Enum):
+    CCL_END = 0
+    CCL_START = 1
+    OPEN_CURLY = 2
+    CLOSE_CURLY = 3
+    OPEN_PAREN = 4
+    CLOSE_PAREN = 5
+    CLOSURE = 6
+    PLUS_CLOSE = 7
+    OR = 8
+    ID = 9
+    OPTIONAL = 10
+    NUMBER = 11
+    COMMA = 12
+    ARROW = 13
+    EOF = 14
+
+class Scanner:
+    def __init__(self, pattern):
+        self.pattern = pattern
+        self.lexeme = ""
+        self.pos = -1
+        self.current_token = None
+        self.tokens = {
+            ']': TokenType.CCL_END,
+            '[': TokenType.CCL_START,
+            '{': TokenType.OPEN_CURLY,
+            '}': TokenType.CLOSE_CURLY,
+            '(': TokenType.OPEN_PAREN,
+            ')': TokenType.CLOSE_PAREN,
+            '*': TokenType.CLOSURE,
+            '+': TokenType.PLUS_CLOSE,
+            '|': TokenType.OR,
+            "?": TokenType.OPTIONAL,
+            ",": TokenType.COMMA,
+        }
+        self.advance()
+    def advance(self):
+        self.pos += 1
+        if self.pos > len(self.pattern) - 1:
+            self.current_token = TokenType.EOF
+            self.lexeme = None
+            return
+        self.lexeme = self.pattern[self.pos]
+        if self.lexeme.isspace():
+            while self.pattern[self.pos].isspace():
+                self.pos += 1
+            self.pos -= 1
+            self.advance()
+            return
+        if self.lexeme in self.tokens:
+            self.current_token = self.tokens[self.lexeme]
+        elif self.lexeme == "-" and self.pattern[self.pos + 1] == ">":
+            self.pos += 1
+            self.lexeme = "->"
+            self.current_token = TokenType.ARROW
+        elif self.lexeme.isalpha():
+            self.lexeme = ""
+            while self.pattern[self.pos].isalnum() or self.pattern[self.pos] == "_":
+                self.lexeme += self.pattern[self.pos]
+                self.pos += 1
+                if self.pos > len(self.pattern) - 1:
+                    break
+            self.pos -= 1
+            self.current_token = TokenType.ID
+        elif self.lexeme.isdigit():
+            self.lexeme = ""
+            while self.pattern[self.pos].isdigit():
+                self.lexeme += self.pattern[self.pos]
+                self.pos += 1
+                if self.pos > len(self.pattern) - 1:
+                    break
+            self.pos -= 1
+            self.lexeme = int(self.lexeme)
+            self.current_token = TokenType.NUMBER
+        else:
+            raise ValueError(f"Invalid character: {self.lexeme}")
+
+class Analyzer:
+    def __init__(self, lexer):
+        self.lexer = lexer
+
+    def atom(self):
+        if self.lexer.current_token == TokenType.ID:
+            product = C([self.lexer.lexeme])
+            self.lexer.advance()
+        elif self.lexer.current_token == TokenType.OPEN_PAREN:
+            self.lexer.advance()
+            product = self.expr()
+            if self.lexer.current_token != TokenType.CLOSE_PAREN:
+                raise ValueError("Missing closing parenthesis")
+            self.lexer.advance()
+        elif self.lexer.current_token == TokenType.CCL_START:
+            self.lexer.advance()
+            product = self.expr().optional()
+            if self.lexer.current_token != TokenType.CCL_END:
+                raise ValueError("Missing closing bracket")
+            self.lexer.advance()
+        return product
+    def closure(self):
+        atom = self.atom()
+        if self.lexer.current_token == TokenType.CLOSURE:
+            self.lexer.advance()
+            product = atom.zero_to_n()
+        elif self.lexer.current_token == TokenType.PLUS_CLOSE:
+            self.lexer.advance()
+            product = atom.one_to_n()
+        elif self.lexer.current_token == TokenType.OPTIONAL:
+            self.lexer.advance()
+            product = atom.optional()
+        elif self.lexer.current_token == TokenType.OPEN_CURLY:
+            self.lexer.advance()
+            if self.lexer.current_token != TokenType.NUMBER:
+                raise ValueError("Missing number")
+            min_count = self.lexer.lexeme
+            self.lexer.advance()
+            if self.lexer.current_token == TokenType.COMMA:
+                self.lexer.advance()
+                if self.lexer.current_token != TokenType.NUMBER:
+                    raise ValueError("Missing number")
+                max_count = self.lexer.lexeme
+                self.lexer.advance()
+                product = atom.repeat(min_count, max_count)
+            elif self.lexer.current_token == TokenType.CLOSE_CURLY:
+                self.lexer.advance()
+                product = atom * min_count
+            else:
+                raise ValueError("Missing comma or closing curly bracket")
+        else:
+            product = atom
+        return product
+    def closure_conn(self):
+        closure = self.closure()
+        while self.lexer.current_token in (TokenType.ID, TokenType.OPEN_PAREN, TokenType.CCL_START):
+            closure &= self.closure()
+        return closure
+    def expr(self):
+        closure_conn = self.closure_conn()
+        while self.lexer.current_token == TokenType.OR:
+            self.lexer.advance()
+            closure_conn |= self.closure_conn()
+        return closure_conn
+    def product(self):
+        if self.lexer.current_token != TokenType.ID:
+            raise ValueError("Missing ID")
+        name = self.lexer.lexeme
+        self.lexer.advance()
+        if self.lexer.current_token != TokenType.ARROW:
+            raise ValueError("Missing arrow")
+        self.lexer.advance()
+        expr = self.expr()
+        return name, expr
+
 class Parser:
     def __init__(self):
-        self.terminal = []
-        self.priority = {}
+        self.terminals = []
+        self.priorities = {}
         self.patterns = {}
 
-    def pattern(self, name, pattern):
+    def pattern(self, text, option = "ALL"):
         def decorator(func):
-            product = Product(name, pattern, func)
-            if pattern.name in self.patterns:
-                self.patterns[name].append(product)
-            else:
-                self.patterns[name] = [product]
+            name, pattern = Analyzer(Scanner(text)).product()
+            patterns = pattern.generate(self.terminals, option)
+            id_ = str(pattern.id)
+            def fn(parser, args):
+                return func(parser, *args)
+            patterns[name] = [Product(name, [id_], fn)]
+            for k, v in patterns.items():
+                if k in self.patterns:
+                    self.patterns[k] += v
+                else:
+                    self.patterns[k] = v
             return func
         return decorator
-    
-    def set_terminal(self, terminal):
-        self.terminal = terminal
 
-    def set_priority(self, priority):
-        self.priority = priority
+    def error(self, func):
+        self.err = func
+        return func
 
     def compile(self):
-        self.goto_table, state_list = make_goto_table(self.terminal, self.patterns)
-        self.action_table = make_action_table(self.terminal, self.priority, self.goto_table, state_list)
+        self.patterns["S'"] = [Product("S'", ["S"], None)]
+        self.goto_table, state_list = make_goto_table(self.terminals, self.patterns)
+        self.action_table = make_action_table(self.terminals, self.priorities, self.goto_table, state_list)
 
-    def parse(self, text):
-        state_stack = [0]
-        value_stack = []
-        index = 0
-        char = text[index]
-        x = char
+    def read(self, lexer):
+        self.lexer = lexer
+
+    def parse(self):
+        self.value_stack = []
+        self.state_stack = [0]
+        self.index = 0
+        self.token = self.lexer.lex()
+        self.tp = self.token.type
         goto_table = self.goto_table
         action_table = self.action_table
         while True:
-            state = state_stack[-1]
-            if (state, x) in action_table:
-                action, arg = action_table[(state, x)]
-            elif (state, x) in goto_table:
-                state_stack.append(goto_table[(state, x)])
-                x = char
+            self.state = self.state_stack[-1]
+            if (self.state, self.tp) in action_table:
+                action, arg = action_table[(self.state, self.tp)]
+            elif (self.state, self.tp) in goto_table:
+                self.state_stack.append(goto_table[(self.state, self.tp)])
+                self.tp = self.token.type
                 continue
-            elif (state, "ε") in action_table:
-                action, arg = action_table[(state, "ε")]
+            elif (self.state, "ε") in action_table:
+                action, arg = action_table[(self.state, "ε")]
             else:
-                print("Error!")
+                self.err(self)
                 break
             if action == "SHIFT":
-                state_stack.append(arg)
-                index += 1
-                char = text[index] if index < len(text) else "$"
-                x = char
+                self.state_stack.append(arg)
+                self.index += 1
+                self.value_stack.append(self.token)
+                self.token = self.lexer.lex()
+                self.tp = self.token.type
             elif action == "REDUCE":
-                for _ in range(len(arg.body)):
-                    state_stack.pop()
+                num = len(arg.body)
+                for _ in range(num):
+                    self.state_stack.pop()
                 if arg.function:
-                    arg.function(value_stack, text[index - 1])
-                x = arg.name
+                    args = [self.value_stack.pop() for _ in range(num)][::-1]
+                    res = arg.function(self, args)
+                    self.value_stack.append(res)
+                self.tp = arg.name
             elif action == "ACCEPT":
                 break
+        return self.value_stack.pop()
