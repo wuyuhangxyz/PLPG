@@ -6,31 +6,41 @@ class NFA:
         self.next_1 = None
         self.next_2 = None
         self.function = None
+        self.error = None
 class DFA:
     STATUS = -1
     def __init__(self, nfas):
-        DFA.STATUS += 1
         self.nfas = nfas
         self.accepted = False
         self.function = None
+        self.error = None
         for i in nfas:
             if i.next_1 is None and i.next_2 is None:
                 self.accepted = True
             if i.function is not None and self.function is None:
                 self.function = i.function
+            if i.error is not None and self.error is None:
+                self.error = i.error
+        DFA.STATUS += 1
         self.status = DFA.STATUS
     def __eq__(self, other):
         return self.status == other.status
 class DFAGroup:
     STATUS = -1
-    def __init__(self, dfas):
-        DFAGroup.STATUS += 1
-        self.status = DFAGroup.STATUS
+    def __init__(self, dfas, status = None):
         self.dfas = dfas
         self.function = None
+        self.error = None
         for i in dfas:
             if i.function is not None and self.function is None:
                 self.function = i.function
+            if i.error is not None and self.error is None:
+                self.error = i.error
+        if status is None:
+            DFAGroup.STATUS += 1
+            self.status = DFAGroup.STATUS
+        else:
+            self.status = status
     def get(self, index):
         return self.dfas[index] if index < len(self.dfas) else None
     def __str__(self):
@@ -38,7 +48,7 @@ class DFAGroup:
     __repr__ = __str__
     def __eq__(self, other):
         return self.dfas == other.dfas
-class Token(enum.Enum):
+class TokenType(enum.Enum):
     EOS = 0
     ANY = 1
     AT_BOL = 2
@@ -57,7 +67,7 @@ class Token(enum.Enum):
     OR = 15
     PLUS_CLOSE = 16
 
-class Lexer:
+class Scanner:
     def __init__(self, pattern):
         self.pattern = pattern
         self.lexeme = ""
@@ -73,26 +83,26 @@ class Lexer:
             'e': '\033',
         }
         self.tokens = {
-            '.': Token.ANY,
-            '^': Token.AT_BOL,
-            '$': Token.AT_EOL,
-            ']': Token.CCL_END,
-            '[': Token.CCL_START,
-            '}': Token.CLOSE_CURLY,
-            ')': Token.CLOSE_PAREN,
-            '*': Token.CLOSURE,
-            '-': Token.DASH,
-            '{': Token.OPEN_CURLY,
-            '(': Token.OPEN_PAREN,
-            '?': Token.OPTIONAL,
-            '|': Token.OR,
-            '+': Token.PLUS_CLOSE,
+            '.': TokenType.ANY,
+            '^': TokenType.AT_BOL,
+            '$': TokenType.AT_EOL,
+            ']': TokenType.CCL_END,
+            '[': TokenType.CCL_START,
+            '}': TokenType.CLOSE_CURLY,
+            ')': TokenType.CLOSE_PAREN,
+            '*': TokenType.CLOSURE,
+            '-': TokenType.DASH,
+            '{': TokenType.OPEN_CURLY,
+            '(': TokenType.OPEN_PAREN,
+            '?': TokenType.OPTIONAL,
+            '|': TokenType.OR,
+            '+': TokenType.PLUS_CLOSE,
         }
         self.advance()
     def advance(self):
         self.pos += 1
         if self.pos > len(self.pattern) - 1:
-            self.current_token = Token.EOS
+            self.current_token = TokenType.EOS
             self.lexeme = None
             return False
         self.lexeme = self.pattern[self.pos]
@@ -100,10 +110,10 @@ class Lexer:
             self.pos += 1
             char = self.pattern[self.pos].lower()
             self.lexeme = self.ev.get(char, char)
-            self.current_token = Token.L
+            self.current_token = TokenType.L
         else:
-            self.current_token = self.tokens.get(self.lexeme, Token.L)
-class Parser:
+            self.current_token = self.tokens.get(self.lexeme, TokenType.L)
+class Analyzer:
     """
     group ::= ("(" expr ")")*
     expr ::= factor_conn ("|" factor_conn)*
@@ -118,8 +128,8 @@ class Parser:
     def dodash(self):
         first = ""
         char_set = set()
-        while self.lexer.current_token != Token.CCL_END:
-            if self.lexer.current_token == Token.DASH:
+        while self.lexer.current_token != TokenType.CCL_END:
+            if self.lexer.current_token == TokenType.DASH:
                 self.lexer.advance()
                 for c in range(ord(first), ord(self.lexer.lexeme) + 1):
                     char_set.add(chr(c))
@@ -131,19 +141,19 @@ class Parser:
         return char_set
     def term(self):
         start = NFA()
-        if self.lexer.current_token == Token.L:
+        if self.lexer.current_token == TokenType.L:
             start.edge = self.lexer.lexeme
             start.next_1 = NFA()
             end = start.next_1
             self.lexer.advance()
-        elif self.lexer.current_token == Token.ANY:
+        elif self.lexer.current_token == TokenType.ANY:
             start.edge = self.ascii_table
             start.next_1 = NFA()
             end = start.next_1
             self.lexer.advance()
-        elif self.lexer.current_token == Token.CCL_START:
+        elif self.lexer.current_token == TokenType.CCL_START:
             self.lexer.advance()
-            if self.lexer.current_token == Token.AT_BOL:
+            if self.lexer.current_token == TokenType.AT_BOL:
                 self.lexer.advance()
                 char_set = self.dodash()
                 self.lexer.advance()
@@ -156,10 +166,10 @@ class Parser:
                 start.edge = char_set
                 start.next_1 = NFA()
                 end = start.next_1
-        elif self.lexer.current_token == Token.OPEN_PAREN:
+        elif self.lexer.current_token == TokenType.OPEN_PAREN:
             self.lexer.advance()
             start, end = self.expr()
-            if self.lexer.current_token != Token.CLOSE_PAREN:
+            if self.lexer.current_token != TokenType.CLOSE_PAREN:
                 raise ValueError("Missing closing parenthesis")
             self.lexer.advance()
         return start, end
@@ -167,20 +177,20 @@ class Parser:
         start, end = self.term()
         new_start = NFA()
         new_end = NFA()
-        if self.lexer.current_token == Token.CLOSURE:
+        if self.lexer.current_token == TokenType.CLOSURE:
             new_start.next_1 = start
             new_start.next_2 = new_end
             end.next_1 = start
             end.next_2 = new_end
             start, end = new_start, new_end
             self.lexer.advance()
-        elif self.lexer.current_token == Token.PLUS_CLOSE:
+        elif self.lexer.current_token == TokenType.PLUS_CLOSE:
             new_start.next_1 = start
             end.next_1 = start
             end.next_2 = new_end
             self.lexer.advance()
             start, end = new_start, new_end
-        elif self.lexer.current_token == Token.OPTIONAL:
+        elif self.lexer.current_token == TokenType.OPTIONAL:
             new_start.next_1 = start
             new_start.next_2 = new_end
             end.next_2 = new_end
@@ -189,14 +199,14 @@ class Parser:
         return start, end
     def factor_conn(self):
         start, end = self.factor()
-        while self.lexer.current_token in (Token.L, Token.ANY, Token.CCL_START, Token.OPEN_PAREN):
+        while self.lexer.current_token in (TokenType.L, TokenType.ANY, TokenType.CCL_START, TokenType.OPEN_PAREN):
             new_start, new_end = self.factor()
             end.next_1 = new_start
             end = new_end
         return start, end
     def expr(self):
         start, end = self.factor_conn()
-        while self.lexer.current_token == Token.OR:
+        while self.lexer.current_token == TokenType.OR:
             self.lexer.advance()
             head = NFA()
             tail = NFA()
@@ -306,53 +316,74 @@ def minimize_dfa(dfa_list, jump_table):
             index += 1
             group = group_list[index] if index < len(group_list) else None
             continue
-        group_list.remove(group)
-        DFAGroup.STATUS -= 1
-        for groups in group_values:
+        group.__init__(group_values[0], group.status)
+        for groups in group_values[1:]:
             new_group = DFAGroup(groups)
             group_list.insert(index, new_group)
             index -= 1
         index += 1
         group = group_list[index] if index < len(group_list) else None
-        
     return group_list
 def create_transition_table(dfa_list, jump_table, group_list):
-    transition_table = [{} for i in range(len(group_list))]
+    transition_table = [{} for _ in range(len(group_list))]
     for dfa in dfa_list:
+        from_group = dfa_in_group(dfa.status, group_list)
         for i in range(127):
             char = chr(i)
             to = jump_table[dfa.status].get(char)
             if to is None:
                 continue
-            from_group = dfa_in_group(dfa.status, group_list)
             to_group = dfa_in_group(to, group_list)
             transition_table[from_group.status][char] = to_group.status
+        if dfa.error:
+            transition_table[from_group.status]["UNCLOSED"] = from_group.error
         if dfa.accepted:
-            from_group = dfa_in_group(dfa.status, group_list)
             transition_table[from_group.status]["ACCEPT"] = from_group.function
     return transition_table
+
+class Token:
+    def __init__(self, type, value):
+        self.type = type
+        self.value = value
+    def __str__(self):
+        return f"Token({self.type}: {self.value})"
+    __repr__ = __str__
 
 class Lexer:
     def __init__(self):
         self.patterns = []
+        self.ignore = []
     
     def pattern(self, pattern):
         def decorator(func):
             self.patterns.append((pattern, func))
             return func
         return decorator
+
+    def unclosed(self, func):
+        self.err = func
+
+    def undefined(self, func):
+        self.error = func
+
+    def eof(self, count = 1):
+        def decorator(func):
+            self.eoffunc = func
+            self.count = count
+            return func
+        return decorator
     
     def compile(self):
         pattern, function = self.patterns[0]
-        lexer = Lexer(pattern)
-        parser = Parser(lexer)
+        lexer = Scanner(pattern)
+        parser = Analyzer(lexer)
         start, end = parser.expr()
         end.function = function
         root = NFA()
         root.next_1 = start
         for pattern, function in self.patterns[1:]:
-            lexer = Lexer(pattern)
-            parser = Parser(lexer)
+            lexer = Scanner(pattern)
+            parser = Analyzer(lexer)
             start, end = parser.expr()
             end.function = function
             root.next_2 = start
@@ -363,31 +394,62 @@ class Lexer:
         self.group_list = minimize_dfa(dfa_list, jump_table)
         self.transition_table = create_transition_table(dfa_list, jump_table, self.group_list)
 
-    def lex(self, string):
-        pos = 0
-        char = string[pos]
-        status = start = dfa_in_group(0, self.group_list).status
-        back = None
-        buffer = ""
-        while char is not None:
-            buffer += char
-            status = self.transition_table[status].get(char)
+    def read(self, string):
+        self.string = string
+        self.pos = 0
+        self.char = string[0]
+        self.status = self.start = dfa_in_group(0, self.group_list).status
+        self.back = None
+        self.buffer = ""
+        self.line = 1
+        self.column = 1
+
+    def advance(self):
+        if self.char == "\n":
+            self.line += 1
+            self.column = 1
+        else:
+            self.column += 1
+        self.pos += 1
+        self.char = self.string[self.pos] if self.pos < len(self.string) else None
+
+    def lex(self):
+        while self.char is not None:
+            if self.char in self.ignore and self.status == self.start:
+                self.advance()
+                continue
+            self.buffer += self.char
+            status = self.status = self.transition_table[self.status].get(self.char)
             if status is None:
-                if back is None:
-                    print("Error!")
-                    break
+                if not self.back:
+                    self.error(self)
                 else:
-                    pos, function = back
-                    status = start
-                    back = None
-                    buffer = buffer[:-1]
-                    function(buffer)
-                    buffer = ""
+                    self.pos, function = self.back
+                    self.buffer = self.buffer[:-1]
+                    self.status = self.start
+                    res = function(self)
+                    self.buffer = ""
+                    self.back = None
+                    self.advance()
+                    self.status = self.start
+                    return res
             else:
                 if "ACCEPT" in self.transition_table[status]:
                     function = self.transition_table[status]["ACCEPT"]
-                    if pos == len(string) - 1:
-                        function(buffer)
-                    back = (pos, function)
-            pos += 1
-            char = string[pos] if pos < len(string) else None
+                    self.back = (self.pos, function)
+                    if self.pos == len(self.string) - 1:
+                        res = function(self)
+                        self.advance()
+                        self.status = self.start
+                        return res
+            self.advance()
+        if self.char is None:
+            if self.status != self.start:
+                res = self.err(self)
+                return res
+            if self.eof is not None and self.count > 0:
+                res = self.eoffunc(self)
+                self.count -= 1
+                return res
+            else:
+                raise Exception("EOF Error!")
